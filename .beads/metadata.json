@@ -1,0 +1,7 @@
+{
+  "database": "dolt",
+  "backend": "dolt",
+  "dolt_mode": "embedded",
+  "dolt_database": "abacus_standards",
+  "project_id": "d86c61a0-0250-4e68-b0ee-5ea746f11f4a"
+}
