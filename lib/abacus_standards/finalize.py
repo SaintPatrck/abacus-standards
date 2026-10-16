@@ -259,8 +259,8 @@ def record_only(bead_id, paths, session, repo):
 
 def record_pr(bead_id, paths, msg, repo, cfg):
     """Draft-pr landing: the records alone, committed onto origin/<default branch> (even when the run was stacked)
-    and opened as their own draft PR. The commit is built in a temporary index, so the run's checkout, index and
-    HEAD are left exactly as they were, and a refusal has nothing local to undo."""
+    and opened as their own draft PR. The commit is built in a temporary index, so the run's index and HEAD are left
+    as they were and a refusal has nothing local to undo. Once the PR is open the record files leave the working tree."""
     bead = show_bead(bead_id, repo)
     default = cfg["default_branch"]
     branch = bead_branch(bead) + "-record"
@@ -278,6 +278,8 @@ def record_pr(bead_id, paths, msg, repo, cfg):
                       f"{(push.stderr or push.stdout)[-1000:]}")
     body = "Records from a run that did not land:\n\n" + "\n".join(f"- {pth}" for pth in paths) + "\n"
     url = open_draft_pr(repo, default, branch, f"Record: {bead.get('title')}", body)
+    for pth in paths:  # they live on the record branch now; left here, a resumed run would refuse the dirty tree
+        (Path(repo) / pth).unlink()
     return {"recorded": paths, "commit": sha, "pushed": True, "bead_closed": False, "branch": branch, "pr": url}
 
 

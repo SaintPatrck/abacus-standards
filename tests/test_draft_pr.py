@@ -257,11 +257,21 @@ class DraftPrTest(unittest.TestCase):
         self.rules(rule)
         child = self.bead("Child work", deps=[parent])
         board.check(child, "coder:r", self.repo)   # a stacked run: the record still targets main
-        (self.repo / "docs" / "retros").mkdir(parents=True)
-        (self.repo / "docs" / "retros" / "fin-1.md").write_text(RETRO)
         head, status = git(self.repo, "rev-parse", "HEAD"), git(self.repo, "status", "--porcelain")
-        out = finalize.record_only(child, ["docs/retros/fin-1.md"], "coder:r", self.repo)
+        retro = self.repo / "docs" / "retros" / "fin-1.md"
+        retro.parent.mkdir(parents=True)
+        retro.write_text(RETRO)
         record = bead_branch(self.show(child)) + "-record"
+        self.rules(rule, {"match": ["pr", "create"], "rc": 1, "stderr": "GraphQL: something went wrong"})
+        with self.assertRaises(Refused):
+            finalize.record_only(child, ["docs/retros/fin-1.md"], "coder:r", self.repo)
+        self.assertEqual(retro.read_text(), RETRO)   # a failure keeps the record, so a plain retry works
+        self.assertIsNone(self.remote_ref(record))
+        self.gh_log.unlink()
+        self.rules(rule)
+        out = finalize.record_only(child, ["docs/retros/fin-1.md"], "coder:r", self.repo)
+        self.assertFalse(retro.exists())   # it lives on the record branch now; the run's tree is clean again
+        self.assertEqual(board.dirty(self.repo), [])
         self.assertEqual(self.remote_ref(record), out["commit"])
         self.assertEqual(git(self.repo, "rev-parse", f"{out['commit']}^"), self.remote_ref("main"))
         self.assertEqual(git(self.repo, "diff", "--name-only", f"{out['commit']}^", out["commit"]),
