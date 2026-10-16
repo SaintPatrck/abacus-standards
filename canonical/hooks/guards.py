@@ -939,9 +939,8 @@ BASH_ONLY = {"foreign-bd", "destructive-git", "stage-writes", "database-url", "o
 READ_GUARDS = {"secrets"}  # the only guard that inspects Read/Grep calls
 
 
-def main(names):
+def main(names, data):
     unknown = [n for n in names if n not in GUARDS]
-    data = sh.payload()
     if unknown:
         sh.refuse("abacus-guards", f"unknown guard(s) {unknown} wired in settings (fail closed)", data)
     tool = data.get("tool_name")
@@ -975,5 +974,28 @@ def interpreter_one_liner(segs):
     return False
 
 
+def run(names):
+    """Fail closed on a crash too: Claude Code reads exit 1 as non-blocking, so an uncaught exception would allow."""
+    try:
+        data = sh.payload()
+        try:
+            return main(names, data)
+        except Exception as e:
+            sh.refuse("abacus-guards", f"guard crashed: {e!r} (fail closed)", data)
+    except SystemExit:
+        raise  # refuse() already exits 2
+    except BaseException as e:  # a crash in the payload read or in refuse() itself still blocks
+        reason = f"guard crashed: {e!r} (fail closed)"
+        try:
+            sh.log_refusal("abacus-guards", reason, {})
+        except BaseException:
+            pass
+        try:
+            print(f"[abacus:abacus-guards] REFUSED: {reason}", file=sys.stderr)
+        except BaseException:
+            pass
+        return 2
+
+
 if __name__ == "__main__":
-    sys.exit(main(sys.argv[1:]))
+    sys.exit(run(sys.argv[1:]))
