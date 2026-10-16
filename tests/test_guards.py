@@ -113,6 +113,25 @@ class GuardTest(unittest.TestCase):
         rc, _ = self.run_hook("Bash", {"command": "ls"}, guards=["repo-fence", "no-such-guard"])
         self.assertEqual(rc, 2)
 
+    def test_bash_payload_without_tool_input_fails_closed(self):
+        env = dict(os.environ, ABACUS_WORKSPACE=str(self.ws), ABACUS_HOME=str(self.home))
+        p = subprocess.run([sys.executable, str(HOOK), *ALL], input=json.dumps({"tool_name": "Bash", "cwd": self.a}),
+                           capture_output=True, text=True, env=env)
+        self.assertEqual(p.returncode, 2, p.stderr)       # exit 1 is non-blocking: a crash would let the call through
+        self.assertIn("guard crashed", p.stderr)
+
+    def test_crashing_guard_fails_closed(self):
+        script = ("import sys; sys.path.insert(0, sys.argv[1]); import guards\n"
+                  "def boom(data, segs): raise RuntimeError('boom')\n"
+                  "guards.GUARDS['repo-fence'] = boom\n"
+                  "sys.exit(guards.run(['repo-fence']))")
+        env = dict(os.environ, ABACUS_WORKSPACE=str(self.ws), ABACUS_HOME=str(self.home), CLAUDE_PROJECT_DIR=self.a)
+        payload = {"tool_name": "Bash", "tool_input": {"command": "ls"}, "cwd": self.a, "session_id": "t"}
+        p = subprocess.run([sys.executable, "-c", script, str(HOOK.parent)], input=json.dumps(payload),
+                           capture_output=True, text=True, env=env)
+        self.assertEqual(p.returncode, 2, p.stderr)
+        self.assertIn("[abacus:abacus-guards] REFUSED: guard crashed: RuntimeError('boom')", p.stderr)
+
     # ------------------------------------------------------------ foreign-bd
     def test_foreign_bd(self):
         b = self.ws / "repo-b"
@@ -339,11 +358,11 @@ class PlannerGuardTest(unittest.TestCase):
     def tearDownClass(cls):
         cls.tmp.cleanup()
 
-    def rc(self, cmd):
+    def rc(self, cmd, **extra_env):
         payload = {"tool_name": "Bash", "tool_input": {"command": f"cd {self.board} && {cmd}"},
                    "cwd": str(self.planner), "session_id": "t"}
         env = dict(os.environ, ABACUS_ROLE="planner", ABACUS_LOGBOOK_DB=str(self.logbook),
-                   ABACUS_HOME=str(self.planner.parent.parent), CLAUDE_PROJECT_DIR=str(self.planner))
+                   ABACUS_HOME=str(self.planner.parent.parent), CLAUDE_PROJECT_DIR=str(self.planner), **extra_env)
         p = subprocess.run([sys.executable, str(HOOK), "foreign-bd"], input=json.dumps(payload),
                            capture_output=True, text=True, env=env)
         return p.returncode, p.stderr
@@ -378,3 +397,11 @@ class PlannerGuardTest(unittest.TestCase):
     def test_operator_ruling_unlocks_labels_on_the_beads_it_names(self):
         self.assertEqual(self.rc(f"bd label add {self.approved_draft} pipeline:lite")[0], 0)
         self.assertEqual(self.rc(f"bd label remove {self.approved_draft} draft")[0], 0)
+
+    def test_missing_bd_fails_closed(self):
+        # is_draft asks bd for the bead's labels; with bd off PATH the guard must refuse, not crash open
+        path = os.pathsep.join(d for d in os.environ.get("PATH", "").split(os.pathsep)
+                               if not os.path.exists(os.path.join(d, "bd")))
+        rc, err = self.rc(f"bd update {self.draft} --title 'Better title'", PATH=path)
+        self.assertEqual(rc, 2, err)
+        self.assertIn("guard crashed", err)

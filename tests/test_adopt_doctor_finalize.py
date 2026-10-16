@@ -251,6 +251,71 @@ class LandedEvidenceTest(unittest.TestCase):
         self.assertFalse(finalize.RANGE_CRITERION.search("README mentions git"))
 
 
+class FinalizeRetryTest(unittest.TestCase):
+    """A refused push takes its commit back: nothing is stranded locally, so a plain retry lands the same changes."""
+
+    RETRO = ("---\nid: fin-retro\nproject: fin\nissue: fin-1\ndate: 2026-10-15\ndoc_type: retro\n"
+             "trigger: escalation\nsurface: tests\nseverity: sev4\nresolved: true\ntags: [retry]\n---\n\nNotes.\n")
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        t = Path(self.tmp.name).resolve()
+        self.remote = t / "remote.git"
+        git(t, "init", "-q", "--bare", "-b", "main", str(self.remote))
+        git(t, "clone", "-q", str(self.remote), "r")
+        self.repo = t / "r"
+        git(self.repo, "config", "user.email", "t@example.com"); git(self.repo, "config", "user.name", "t")
+        subprocess.run(["bd", "init", "--prefix", "fin", "--quiet", "--skip-agents", "--skip-hooks", "--non-interactive"],
+                       cwd=self.repo, check=True, capture_output=True)
+        (self.repo / ".abacus").mkdir()
+        (self.repo / ".abacus" / "config.json").write_text(json.dumps({"project": "fin"}))
+        (self.repo / "README.md").write_text("demo\n")
+        git(self.repo, "add", "-A"); git(self.repo, "commit", "-q", "-m", "init"); git(self.repo, "push", "-q", "origin", "main")
+        self.bead = subprocess.run(["bd", "create", "Add a line", "-d", "x", "--acceptance", "- README has the line",
+                                    "--silent"], cwd=self.repo, check=True, capture_output=True, text=True).stdout.strip()
+        self.verdicts = t / "verdicts.json"
+        self.verdicts.write_text(json.dumps([{"criterion": "README has the line", "verdict": "met",
+                                              "evidence": "README.md:2"}]))
+        hook = self.remote / "hooks" / "pre-receive"
+        hook.write_text("#!/bin/sh\necho 'rejected by the test remote' >&2\nexit 1\n")
+        hook.chmod(0o755)
+        self.hook = hook
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def status(self):
+        from abacus_standards.common import show_bead
+        return show_bead(self.bead, self.repo)["status"]
+
+    def test_a_refused_push_leaves_the_changes_staged_for_a_plain_retry(self):
+        before = git(self.repo, "rev-parse", "HEAD")
+        (self.repo / "README.md").write_text("demo\nthe line\n")
+        with self.assertRaises(Refused) as cm:
+            finalize.finalize(self.bead, str(self.verdicts), "coder:r", None, self.repo)
+        self.assertIn("push failed", str(cm.exception))
+        self.assertNotIn("local only", str(cm.exception))
+        self.assertEqual(git(self.repo, "rev-parse", "HEAD"), before)
+        self.assertEqual(git(self.repo, "diff", "--cached", "--name-only"), "README.md")
+        self.assertNotEqual(self.status(), "closed")
+        self.hook.unlink()
+        out = finalize.finalize(self.bead, str(self.verdicts), "coder:r", None, self.repo)
+        self.assertEqual(git(self.remote, "rev-parse", "main"), out["commit"])
+        self.assertEqual(self.status(), "closed")
+
+    def test_a_refused_record_push_leaves_nothing_committed_for_a_plain_retry(self):
+        before = git(self.repo, "rev-parse", "HEAD")
+        (self.repo / "docs" / "retros").mkdir(parents=True)
+        (self.repo / "docs" / "retros" / "fin-1.md").write_text(self.RETRO)
+        with self.assertRaises(Refused):
+            finalize.record_only(self.bead, ["docs/retros/fin-1.md"], "coder:r", self.repo)
+        self.assertEqual(git(self.repo, "rev-parse", "HEAD"), before)
+        self.hook.unlink()
+        out = finalize.record_only(self.bead, ["docs/retros/fin-1.md"], "coder:r", self.repo)
+        self.assertEqual(git(self.remote, "rev-parse", "main"), out["commit"])
+        self.assertNotEqual(self.status(), "closed")
+
+
 class JudgmentRulingIdTest(unittest.TestCase):
     """5rg: rows may end with `ruling: #<id>` so a relayed RULING message can be matched to its row."""
 
