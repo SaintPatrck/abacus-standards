@@ -111,6 +111,15 @@ def close_reason(criteria, verdicts, sha, pipeline, session, land):
     return "\n".join(lines)
 
 
+def uncommit(repo, sha, mode, left):
+    """Take back the commit this run just made, so a plain retry finds the changes again. Only that commit: if HEAD
+    has moved past it, it stays and the refusal says so."""
+    head = run(["git", "rev-parse", "HEAD"], cwd=repo).stdout.strip()
+    if head == sha and run(["git", "reset", "-q", mode, "HEAD~1"], cwd=repo).returncode == 0:
+        return f"commit {sha[:12]} undone; {left}, so a plain retry works."
+    return f"commit {sha[:12]} could not be undone and is still local."
+
+
 def finalize(bead_id, verdict_file, session, summary, repo, dry_run=False):
     cfg = load_config(repo)
     bead = show_bead(bead_id, repo)
@@ -134,15 +143,18 @@ def finalize(bead_id, verdict_file, session, summary, repo, dry_run=False):
            f"Co-Authored-By: Claude <noreply@anthropic.com>\n")
     run(["git", "commit", "-q", "-F", "-"], cwd=repo, check=True, input=msg)
     sha = run(["git", "rev-parse", "HEAD"], cwd=repo, check=True).stdout.strip()
-    trailers = run(["git", "log", "-1", "--format=%(trailers:only,unfold)"], cwd=repo, check=True).stdout
-    missing = [t for t in TRAILERS if f"{t}:" not in trailers]
-    if missing:
-        raise Refused(f"commit {sha[:12]} is missing trailers {missing}; not pushing")
-    land = landed(repo, f"origin/{cfg['default_branch']}", sha)
-    push = run(["git", "push", "origin", f"HEAD:{cfg['default_branch']}"], cwd=repo)
-    if push.returncode != 0:
-        raise Refused(f"push failed; the bead stays OPEN and the commit {sha[:12]} is local only. "
-                      f"Report BLOCKED with this output:\n{(push.stderr or push.stdout).strip()[-1500:]}")
+    try:
+        trailers = run(["git", "log", "-1", "--format=%(trailers:only,unfold)"], cwd=repo, check=True).stdout
+        missing = [t for t in TRAILERS if f"{t}:" not in trailers]
+        if missing:
+            raise Refused(f"commit {sha[:12]} is missing trailers {missing}; not pushing")
+        land = landed(repo, f"origin/{cfg['default_branch']}", sha)
+        push = run(["git", "push", "origin", f"HEAD:{cfg['default_branch']}"], cwd=repo)
+        if push.returncode != 0:
+            raise Refused(f"push failed; the bead stays OPEN. "
+                          f"Report BLOCKED with this output:\n{(push.stderr or push.stdout).strip()[-1500:]}")
+    except Refused as e:  # a commit left behind would make the retry refuse with "nothing to commit"
+        raise Refused(f"{uncommit(repo, sha, '--soft', 'its changes are staged again')}\n{e}")
     reason = close_reason(criteria, verdicts, sha, pipeline, session, land)
     run(["bd", "close", bead_id, "--reason-file", "-"], cwd=repo, check=True, input=reason,
         env={"BEADS_ACTOR": session})
@@ -169,7 +181,9 @@ def record_only(bead_id, paths, session, repo):
     sha = run(["git", "rev-parse", "HEAD"], cwd=repo, check=True).stdout.strip()
     push = run(["git", "push", "origin", f"HEAD:{cfg['default_branch']}"], cwd=repo)
     if push.returncode != 0:
-        raise Refused(f"record committed as {sha[:12]} but push failed:\n{(push.stderr or push.stdout)[-1000:]}")
+        # unstaged too (--mixed): nothing else was staged, and a staged record would trip that check on the retry
+        undone = uncommit(repo, sha, "--mixed", "the records are back in the working tree, unstaged")
+        raise Refused(f"{undone}\nrecord push failed:\n{(push.stderr or push.stdout)[-1000:]}")
     return {"recorded": paths, "commit": sha, "pushed": True, "bead_closed": False}
 
 
